@@ -1,4 +1,4 @@
-# 📱 Cookdin WhatsApp Automation POC
+# 📱 Cookdin WhatsApp Automatic notification
 
 [![Python](https://img.shields.io/badge/Python-3.9+-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.103+-009688.svg?logo=fastapi)](https://fastapi.tiangolo.com/)
