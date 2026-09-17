@@ -58,7 +58,6 @@ def whatsapp_webhook_internal(payload: WebhookPayload, db: Session):
     db.commit()
     
     # AUTOMATIC RETRY ENGINE
-    # If the webhook reports failure, automatically trigger a retry (up to 1 time for POC)
     if payload.status == "failed" and db_log.retry_count < 1:
         auto_retry_task(db_log.id)
 
@@ -71,27 +70,58 @@ def read_root():
     with open(html_path, "r", encoding="utf-8") as f:
         return f.read()
 
-@app.post("/api/v1/notify")
-def trigger_notification(event: NotificationEvent, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+# --- MOCK CORE APPLICATION API ---
+class BookingRequest(BaseModel):
+    customer_phone: str
+    booking_id: str
+    whatsapp_opt_in: bool = True
+
+@app.post("/api/v1/bookings")
+def create_mock_booking(booking: BookingRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     """
-    Main Integration Boundary: Receives events automatically from the core Cookdin backend.
+    Simulates the actual Cookdin Backend creating a booking.
+    When a booking is created, it automatically generates a BOOKING_CREATED event
+    and passes it to the Notification Service (Internal Event Bus Simulation).
     """
+    # 1. (Simulated) Save booking to core database here...
+    
+    # 2. Automatically generate the NotificationEvent
+    event = NotificationEvent(
+        event_type="BOOKING_CREATED",
+        customer_phone=booking.customer_phone,
+        whatsapp_opt_in=booking.whatsapp_opt_in,
+        event_data={"booking_id": booking.booking_id}
+    )
+    
+    # 3. Trigger Notification Engine internally
     engine_client = NotificationEngine(db)
     result = engine_client.process_event(event)
     
-    if result["status"] == "failed":
-        raise HTTPException(status_code=500, detail=result)
-        
-    # AUTOMATION SIMULATION: If we are mocking, tell the background task to simulate the Meta Webhooks arriving later
     if settings.use_mock_api and result.get("message_id"):
         background_tasks.add_task(simulate_meta_webhook_flow, result["message_id"], event.customer_phone)
         
+    return {"status": "success", "message": "Booking created. Notification automatically triggered."}
+
+
+# --- NOTIFICATION ENGINE INTEGRATION ENDPOINTS ---
+@app.post("/api/v1/notify")
+def trigger_notification(event: NotificationEvent, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """
+    External API Integration Boundary. 
+    Can be used if external microservices need to trigger notifications.
+    """
+    engine_client = NotificationEngine(db)
+    result = engine_client.process_event(event)
+    if result["status"] == "failed":
+        raise HTTPException(status_code=500, detail=result)
+    if settings.use_mock_api and result.get("message_id"):
+        background_tasks.add_task(simulate_meta_webhook_flow, result["message_id"], event.customer_phone)
     return result
 
 @app.post("/webhook/whatsapp")
 def whatsapp_webhook(payload: WebhookPayload, db: Session = Depends(get_db)):
     """
-    Webhook endpoint to automatically receive status updates from Meta (delivered, read, failed).
+    Webhook endpoint to automatically receive status updates from Meta.
     """
     whatsapp_webhook_internal(payload, db)
     return {"status": "success"}
