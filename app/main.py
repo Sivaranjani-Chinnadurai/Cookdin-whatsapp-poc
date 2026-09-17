@@ -1,12 +1,14 @@
-from fastapi import FastAPI, Depends, HTTPException, Request
+from fastapi import FastAPI, Depends, HTTPException, Request, BackgroundTasks
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
+from pydantic import BaseModel
 import os
+import asyncio
 from app.config import settings
 from app.schemas import NotificationEvent
-from app.database import engine, get_db, Base
+from app.database import engine, get_db, Base, SessionLocal
 from app import models
-from app.whatsapp import WhatsAppClient
+from app.engine import NotificationEngine
 
 # Automatically create the database tables when the app starts
 Base.metadata.create_all(bind=engine)
@@ -17,9 +19,51 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Initialize WhatsApp client
-whatsapp_client = WhatsAppClient()
+class WebhookPayload(BaseModel):
+    message_id: str
+    status: str # delivered, read, failed
 
+# --- AUTOMATION BACKGROUND TASKS ---
+def auto_retry_task(log_id: int):
+    """Simulates an automated Cron/Celery job that retries failed messages."""
+    import time
+    time.sleep(2) # Wait 2 seconds before retrying
+    db = SessionLocal()
+    try:
+        engine_client = NotificationEngine(db)
+        engine_client.retry_failed_message(log_id)
+    finally:
+        db.close()
+
+async def simulate_meta_webhook_flow(message_id: str, phone: str):
+    """Simulates Meta automatically sending webhooks back to our server over time."""
+    await asyncio.sleep(1.5)
+    db = SessionLocal()
+    try:
+        if phone.endswith("000"):
+            whatsapp_webhook_internal(WebhookPayload(message_id=message_id, status="failed"), db)
+        else:
+            whatsapp_webhook_internal(WebhookPayload(message_id=message_id, status="delivered"), db)
+            await asyncio.sleep(1.5)
+            whatsapp_webhook_internal(WebhookPayload(message_id=message_id, status="read"), db)
+    finally:
+        db.close()
+
+def whatsapp_webhook_internal(payload: WebhookPayload, db: Session):
+    """Internal function for webhook processing to allow background tasks to call it."""
+    db_log = db.query(models.NotificationLog).filter(models.NotificationLog.message_id == payload.message_id).first()
+    if not db_log: return
+    
+    db_log.status = payload.status
+    db.commit()
+    
+    # AUTOMATIC RETRY ENGINE
+    # If the webhook reports failure, automatically trigger a retry (up to 1 time for POC)
+    if payload.status == "failed" and db_log.retry_count < 1:
+        auto_retry_task(db_log.id)
+
+
+# --- ROUTES ---
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 def read_root():
     """Serve the dashboard HTML page on the root URL."""
@@ -28,102 +72,32 @@ def read_root():
         return f.read()
 
 @app.post("/api/v1/notify")
-def trigger_notification(event: NotificationEvent, db: Session = Depends(get_db)):
+def trigger_notification(event: NotificationEvent, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     """
-    Endpoint to receive application events, map them to templates, and send WhatsApp messages.
+    Main Integration Boundary: Receives events automatically from the core Cookdin backend.
     """
-    db_log = models.NotificationLog(
-        event_type=event.event_type.value,
-        customer_phone=event.customer_phone,
-        status="pending",
-        event_data=event.event_data
-    )
-    db.add(db_log)
-    db.commit()
-    db.refresh(db_log)
+    engine_client = NotificationEngine(db)
+    result = engine_client.process_event(event)
     
-    # Dynamic Template Mapping
-    template_name = "hello_world"
-    components = []
-    
-    if event.event_type.value == "booking_created":
-        template_name = "cookdin_booking_confirmed"
-        booking_id = event.event_data.get("booking_id", "UNKNOWN_ID")
-        amount = event.event_data.get("amount", "0")
-        components = [
-            {
-                "type": "body",
-                "parameters": [
-                    {"type": "text", "text": str(booking_id)},
-                    {"type": "text", "text": str(amount)}
-                ]
-            }
-        ]
-    elif event.event_type.value == "registration":
-        template_name = "cookdin_welcome"
-        name = event.customer_name or "Valued Customer"
-        components = [
-            {
-                "type": "body",
-                "parameters": [
-                    {"type": "text", "text": name}
-                ]
-            }
-        ]
-    
-    # Call the WhatsApp API (Will hit our local simulator)
-    success, result = whatsapp_client.send_template_message(
-        recipient_phone=event.customer_phone,
-        template_name=template_name,
-        components=components
-    )
-    
-    if success:
-        db_log.status = "sent"
-        db.commit()
-        return {
-            "status": "success",
-            "message": f"WhatsApp message processed successfully for event: {event.event_type.value}",
-            "log_id": db_log.id,
-            "api_response": result
-        }
-    else:
-        db_log.status = "failed"
-        db.commit()
-        raise HTTPException(
-            status_code=500, 
-            detail=f"Failed to send WhatsApp message. API Error: {result}"
-        )
+    if result["status"] == "failed":
+        raise HTTPException(status_code=500, detail=result)
+        
+    # AUTOMATION SIMULATION: If we are mocking, tell the background task to simulate the Meta Webhooks arriving later
+    if settings.use_mock_api and result.get("message_id"):
+        background_tasks.add_task(simulate_meta_webhook_flow, result["message_id"], event.customer_phone)
+        
+    return result
+
+@app.post("/webhook/whatsapp")
+def whatsapp_webhook(payload: WebhookPayload, db: Session = Depends(get_db)):
+    """
+    Webhook endpoint to automatically receive status updates from Meta (delivered, read, failed).
+    """
+    whatsapp_webhook_internal(payload, db)
+    return {"status": "success"}
 
 @app.get("/api/v1/notifications")
 def get_notifications(db: Session = Depends(get_db)):
-    """
-    Fetch all notification logs from the database.
-    """
+    """Fetch all notification logs from the database."""
     logs = db.query(models.NotificationLog).all()
     return logs
-
-# =====================================================================
-# META API SIMULATOR
-# =====================================================================
-@app.post("/mock-meta/messages", include_in_schema=False)
-async def mock_meta_api(request: Request):
-    """
-    Simulates the real Meta WhatsApp Cloud API.
-    """
-    auth_header = request.headers.get("Authorization")
-    if not auth_header or auth_header != f"Bearer {settings.whatsapp_api_token}":
-        raise HTTPException(
-            status_code=401, 
-            detail={"error": {"message": "Invalid OAuth access token."}}
-        )
-        
-    payload = await request.json()
-    template_data = payload.get("template", {})
-    
-    return {
-        "messaging_product": "whatsapp",
-        "contacts": [{"input": payload.get("to"), "wa_id": payload.get("to")}],
-        "messages": [{"id": f"wamid.mock_{template_data.get('name')}_123"}],
-        "mock_debug_received_template": template_data 
-    }

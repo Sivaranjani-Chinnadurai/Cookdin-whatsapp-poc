@@ -2,66 +2,152 @@
 
 [![Python](https://img.shields.io/badge/Python-3.9+-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.103+-009688.svg?logo=fastapi)](https://fastapi.tiangolo.com/)
-[![Status](https://img.shields.io/badge/Status-R&D_POC-orange.svg)]()
+[![Status](https://img.shields.io/badge/Status-R&D_POC-green.svg)]()
 
-> A high-performance, asynchronous Proof of Concept for the **Cookdin AI-Ready WhatsApp Automation & Notification System**. 
+> A fully automated Proof of Concept for the **Cookdin AI-Ready WhatsApp Automation & Notification System**. 
 
 ## 📋 Executive Summary
 
-Application events (such as booking, payment, cancellation, and completion) currently require manual or separate customer communication. This R&D project demonstrates an **end-to-end automated architecture** to trigger WhatsApp messages instantly when backend events occur.
+Application events (such as booking, payment, cancellation, and completion) currently require manual or separate customer communication. This R&D project demonstrates an **end-to-end automated architecture** to trigger WhatsApp messages automatically when backend events occur.
 
-To avoid Meta's sandbox limitations during development, this POC includes a fully-functional **Meta API Simulator**, allowing developers and stakeholders to test the entire data pipeline—from event triggering to database logging—locally.
+> **⚠️ POC Limitation:** Access to the Cookdin production/staging backend and real application event system was not available during development. Therefore, application events are simulated locally. The API contract is designed so that it can later be connected to the actual Cookdin backend.
+
+To avoid Meta's sandbox limitations during development, this POC includes a fully-functional **Mock/Simulator Provider**. We utilize **FastAPI Background Tasks** to automatically simulate the lifecycle of Meta's webhooks, allowing stakeholders to watch the entire data pipeline run automatically without manual intervention.
 
 ---
 
 ## 🏗️ System Architecture
 
 ```text
-[ Cookdin Core App ]
-        │ (1) Event Trigger (e.g., Booking Created)
-        ▼
-[ FastAPI /notify Endpoint ] ──(2) Log Event to DB (Status: Pending)──► [ SQLite Database ]
-        │
-        │ (3) Map variables & format Meta JSON Payload
-        ▼
-[ WhatsApp Client Service ]
-        │
-        │ (4) Dispatch to Meta Cloud API (or Local Simulator)
-        ▼
-[ Meta / WhatsApp Servers ] ──(5) Return Response (Success/Fail)──► [ SQLite Database ]
-                                                                       (Update Status)
+[ Simulated Cookdin Event ]
+            │
+            ▼
+[ POST /api/v1/notify ]
+            │
+            ▼
+[ Validate Event Payload ]
+            │
+            ▼
+[ Check Customer + Opt-in ] ──(NO)──► [ Skip & Log ]
+            │ (YES)
+            ▼
+[ Select WhatsApp Template ]
+            │
+            ▼
+[ Notification Engine ]
+            │
+            ▼
+[ WhatsApp Provider Interface ]
+       ↙          ↘
+  [ Mock ]     [ Meta ]
+       │          │
+       ▼          ▼
+   [ Message Sent ]
+            │
+            ▼
+   [ Database Log ]
+            │
+            ▼
+ [ Automated Webhooks ] 
+(DELIVERED / READ / FAILED)
+            │
+            ▼
+ [ Auto-Retry if Failed ]
 ```
 
 ---
 
 ## 🛠️ Tech Stack
 
-- **Backend Framework:** [FastAPI](https://fastapi.tiangolo.com/) (Python)
-- **Database:** SQLite with **SQLAlchemy** ORM
+- **Backend Framework:** FastAPI (Python)
+- **Background Processing:** FastAPI BackgroundTasks (Simulating Celery/Cron)
+- **Database:** SQLite with SQLAlchemy ORM
 - **Data Validation:** Pydantic
-- **Frontend Dashboard:** HTML5, Vanilla JS, **Tailwind CSS**
-- **External Integration:** Meta WhatsApp Cloud API (Graph v17.0)
+- **Frontend Dashboard:** HTML5, Vanilla JS, Tailwind CSS
+- **External Integration:** Meta WhatsApp Cloud API
 
 ---
 
-## 🚀 Key Features
+## 🚀 Key Integrations & Event Flow
 
-1. **Strict Event Validation:** Uses Pydantic models to ensure incoming events have correct data structures (preventing bad data from reaching WhatsApp).
-2. **Dynamic Template Engine:** Automatically maps abstract application events (`booking_created`) to approved Meta templates (`cookdin_booking_confirmed`), injecting variables like `Booking ID` and `Amount` into the message body.
-3. **Resilient Logging:** Every event is written to the database *before* the network request is made. If the Meta API fails, the log is marked as `failed` for future retry mechanisms.
-4. **Interactive Dashboard:** A sleek, Tailwind-powered UI to simulate backend triggers and monitor delivery logs in real-time.
+### 1. Supported Event Types
+The system strictly validates the following application boundaries:
+- `REGISTRATION`
+- `BOOKING_CREATED`
+- `BOOKING_CONFIRMED`
+- `PAYMENT_SUCCESS`
+- `PAYMENT_FAILED`
+- `BOOKING_REMINDER`
+- `BOOKING_CANCELLED`
+- `REFUND_PROCESSED`
+- `BOOKING_COMPLETED`
+
+### 2. Template Mapping
+The Notification Engine maps abstract events to approved WhatsApp templates (e.g., `booking_created` → `cookdin_booking_created`).
+
+### 3. Automated Webhook Lifecycle
+The Mock Provider uses background tasks to hit the `POST /webhook/whatsapp` endpoint automatically, simulating the real-time delivery receipt lifecycle:
+- **Success Flow:** `SENT` → `DELIVERED` → `READ`
+- **Error Flow:** `SENT` → `FAILED`
+
+### 4. Automated Retry Engine
+If a webhook returns a `FAILED` status, the background engine catches it and automatically schedules a retry event without human intervention.
+
+---
+
+## 🗄️ Database Design
+
+The local POC uses SQLite, but the schema is designed for eventual migration to PostgreSQL.
+
+- **`customers`** *(Theoretical)*: Tracks `customer_id`, `phone`, and `whatsapp_opt_in`.
+- **`bookings`** *(Theoretical)*: Core business logic.
+- **`notification_logs`** *(Implemented)*: 
+  - `id` (PK)
+  - `event_type`
+  - `customer_phone`
+  - `status` (pending, sent, delivered, read, failed)
+  - `message_id` (Mapped to Meta Webhooks)
+  - `retry_count`
+  - `provider_used` (mock or meta)
+
+---
+
+## 🔌 API Specification
+
+### Sample Event Request (`POST /api/v1/notify`)
+```json
+{
+  "event_type": "BOOKING_CREATED",
+  "customer_phone": "+919876543210",
+  "customer_id": "C101",
+  "whatsapp_opt_in": true,
+  "event_data": {
+    "booking_id": "CD001"
+  }
+}
+```
+
+### Sample Event Response
+```json
+{
+  "status": "success",
+  "message": "Dispatched to provider",
+  "log_id": 1,
+  "message_id": "wamid.mock_a1b2c3d4"
+}
+```
 
 ---
 
 ## ⚙️ Local Setup & Installation
 
 ### Prerequisites
-- Python 3.9 or higher
+- Python 3.9+
 - Git
 
 ### 1. Clone & Initialize
 ```bash
-git clone https://github.com/your-org/cookdin-whatsapp-poc.git
+git clone https://github.com/Sivaranjani-Chinnadurai/Cookdin-whatsapp-poc.git
 cd cookdin-whatsapp-poc
 python -m venv venv
 ```
@@ -75,39 +161,21 @@ python -m venv venv
 pip install -r requirements.txt
 ```
 
-### 4. Configuration
-Create a `.env` file in the root directory. For initial testing, you can omit the keys to run in **Simulator Mode**.
-```env
-# Set to False to disable the simulator and hit Meta's real servers
-USE_MOCK_API=True
-
-# Meta Developer Credentials
-WHATSAPP_API_TOKEN=your_real_meta_token_here
-WHATSAPP_PHONE_NUMBER_ID=your_real_phone_id_here
-```
-
-### 5. Launch the Server
+### 4. Run the Server
 ```bash
 uvicorn app.main:app --reload
 ```
 
----
-
-## 💻 Usage & Demonstration
-
-### The UI Dashboard
-Navigate to `http://127.0.0.1:8000/` in your browser to access the Cookdin POC Dashboard. Use the form on the left to simulate a booking, and watch the database logs update on the right.
-
-### API Endpoints
-If you prefer testing via cURL, Postman, or the automated Swagger UI (`/docs`):
-
-- `POST /api/v1/notify` - Accepts an event payload and triggers the WhatsApp message.
-- `GET /api/v1/notifications` - Fetches the historical log of all processed messages.
+> **Troubleshooting Note:** If you encounter a `500 Internal Server Error` during development or after pulling new code, it is likely due to an SQLite schema mismatch. Simply delete the `whatsapp_poc.db` file and restart the server to generate a fresh database.
 
 ---
 
-## 🔮 Future Roadmap (Production Readiness)
-- [ ] **Webhook Integration:** Implement a `POST /webhook` endpoint to listen for Meta's delivery receipts (Delivered, Read).
-- [ ] **Background Workers:** Move the `requests.post` call to a Celery worker to prevent blocking the main thread during high traffic.
-- [ ] **PostgreSQL Migration:** Swap SQLite for PostgreSQL for concurrent writing.
-- [ ] **Retry Engine:** Build a cron job to automatically retry events marked as `failed` due to network timeouts.
+## ⚖️ POC vs. Production Implementation
+
+| Feature | POC State | Production Target |
+|---------|-----------|-------------------|
+| **Database** | SQLite | PostgreSQL |
+| **Provider** | Mock Simulator (with BackgroundTasks) | Real Meta WhatsApp Provider |
+| **Events** | Simulated via UI Dashboard | Triggered by existing Cookdin backend |
+| **Webhooks** | Automated via Background Simulation | Automated via Meta Graph API |
+| **Retries** | Automated via BackgroundTasks | Automated via Celery / Redis |
