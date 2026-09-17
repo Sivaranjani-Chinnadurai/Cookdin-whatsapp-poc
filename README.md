@@ -19,10 +19,16 @@ To avoid Meta's sandbox limitations during development, this POC includes a full
 ## 🏗️ System Architecture
 
 ```text
-[ Simulated Cookdin Event ]
+[ Simulated Cookdin App ]
             │
             ▼
-[ POST /api/v1/notify ]
+[ POST /api/v1/bookings ]
+            │
+            ▼
+[ Create Booking in DB ]
+            │
+            ▼
+[ Generate BOOKING_CREATED Event ]
             │
             ▼
 [ Validate Event Payload ]
@@ -114,7 +120,7 @@ The local POC uses SQLite, but the schema is designed for eventual migration to 
 
 ## 🔌 API Specification
 
-### Sample Event Request (`POST /api/v1/notify`)
+### Sample Event Request (`POST /api/v1/bookings`)
 ```json
 {
   "event_type": "BOOKING_CREATED",
