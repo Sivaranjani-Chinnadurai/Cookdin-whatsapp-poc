@@ -1,0 +1,22 @@
+# Environments
+venv/
+env/
+ENV/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment Variables (CRITICAL: Keep secrets out of GitHub!)
+.env
+
+# SQLite Database (Do not push local transaction logs to GitHub!)
+*.db
+*.sqlite3
+whatsapp_poc.db
+
+# OS / IDEs
+.DS_Store
+.vscode/
+.idea/
